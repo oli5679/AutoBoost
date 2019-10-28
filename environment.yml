@@ -1,0 +1,35 @@
+name: classifierTools
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - black
+  - flask
+  - ipython
+  - jupyter
+  - jupyter_client
+  - jupyter_console
+  - jupyter_core
+  - jupyterlab
+  - jupyterlab_server
+  - lightgbm
+  - matplotlib
+  - matplotlib-base
+  - numba
+  - numpy
+  - pandas
+  - patsy
+  - pip
+  - pytest
+  - python=3.7.3
+  - scikit-learn
+  - scipy
+  - seaborn
+  - shap
+  - statsmodels
+  - sympy
+  - pip:
+    - nyoka
+    - git+https://github.com/darenr/scikit-optimize
+prefix: //anaconda3/envs/classifierTools
+
