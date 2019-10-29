@@ -7,19 +7,15 @@ import shap
 import matplotlib.pyplot as plt
 import subprocess
 import pickle
-from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from nyoka import lgb_to_pmml
 import shutil
 import os
-from skopt import BayesSearchCV
 
+import config
+import general
+import preprocess
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-pd.options.mode.chained_assignment = None  # default='warn'
-
-from utils import general, preprocess
 
 LGB_SEARCH_SPACE = {
     "learning_rate": (0.003, 1.0, "log-uniform"),
@@ -33,6 +29,12 @@ LGB_SEARCH_SPACE = {
     "reg_alpha": (1e-3, 1.0, "log-uniform"),
     "n_estimators": (50, 1600),
 }
+
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+pd.options.mode.chained_assignment = None  # default='warn'
+
 
 
 class AutoBuilder:
@@ -178,7 +180,7 @@ class AutoBuilder:
         """
         # todo, can I save memory, code and possibly tune binning strats by passing unencoded X_train into pipeline?
         logger.info(f"tuning {self.tuning_iters}")
-        results = bayes_hyperparam_tune(
+        results = general.bayes_hyperparam_tune(
             X=self.X_train_encoded,
             y=self.y_train,
             search_space=self.search_space,
@@ -287,7 +289,7 @@ class AutoBuilder:
             importance_cutoff=self.importance_cutoff,
             corr_threshold=self.corr_cutoff,
         )
-
+        logger.info(f'remove cols - {self.cols_to_remove}')
         logger.info("fitting new model")
         self._create_pipeline()
 
@@ -304,44 +306,25 @@ class AutoBuilder:
         logger.info(f"saving model \n{self.output_dir_path}")
 
         self._save_model()
+
+        logger.info(f"test-case Flask \n{ dict(self.X_test.iloc[0]) }")
+        logger.info(f"test-case Openscoring \n{ dict(self.X_train_encoded.drop(columns=self.cols_to_remove).iloc[0]) }")
+        logger.info(f"test-case model score \n{self.classifer_pipeline.predict_proba(self.X_test.head(1))}")
+
+
+
         logger.info("done!")
 
-
-def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
-    """
-    Bayesian tuning for a Lightgbm classifier, efficiently tuning hyperparams
-    
-    Args:
-        X (dataframe): model_features
-        y (series): binary target
-        search_space (dictionary): parameter space to search
-        n_iters (int): number of points in search space to evaluate
-        
-    Returns:
-        results (object): recording of avg. crossvalidated bier-score at each point in search-space
-    """
-
-    def update_model_status(optim_result):
-        """Status callback durring bayesian hyperparameter search"""
-        logger.info(
-            f"""Model #{len(pd.DataFrame(bayes_cv_tuner.cv_results_))  }
-        Best Brier: { np.round(bayes_cv_tuner.best_score_, 7)}
-        Best params: { bayes_cv_tuner.best_params_}
-        """
-        )
-
-    bayes_cv_tuner = BayesSearchCV(
-        estimator=lgb.LGBMClassifier(
-            objective="binary", metric="auc", n_jobs=-1, verbose=1
-        ),
-        search_spaces=search_space,
-        scoring="brier_score_loss",
-        cv=StratifiedKFold(n_splits=5),
-        n_jobs=-1,
-        n_iter=n_iters,
-        verbose=0,
-        refit=True,
-        error_score=-100,
+if __name__ == "__main__":
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    auto_builder = AutoBuilder(
+        csv_path=config.csv_path,
+        output_dir_path=config.output_dir_path,
+        target_col=config.target_col,
+        drop_cols=config.drop_cols,
+        date_cols=config.date_cols,
+        tuning_iters=25,
+        tune_flag=False
     )
-
-    return bayes_cv_tuner.fit(X.values, y.values, callback=update_model_status)
+    auto_builder.auto_build()

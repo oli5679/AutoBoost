@@ -1,4 +1,4 @@
-name: classifierTools
+name: AutoBoost
 channels:
   - conda-forge
   - defaults
@@ -31,5 +31,5 @@ dependencies:
   - pip:
     - nyoka
     - git+https://github.com/darenr/scikit-optimize
-prefix: //anaconda3/envs/classifierTools
+prefix: //anaconda3/envs/AutoBoost
 

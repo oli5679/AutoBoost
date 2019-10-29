@@ -2,9 +2,9 @@ target_col = "target"
 
 target_mapping = {1: 1, 0: 0}
 
-csv_path = "../data/road-safety/raw.csv"
+csv_path = "data/road-safety-raw.csv"
 
-output_dir_path = "../output/road-safety/1.1"
+output_dir_path = "data/road-safety-1.1"
 
 drop_cols = [
     "Accident_Index",

@@ -10,9 +10,24 @@ from sklearn import metrics
 import subprocess
 import pickle
 import logging
+from skopt import BayesSearchCV
+from sklearn.model_selection import StratifiedKFold
 
 
 logger = logging.getLogger(__name__)
+
+LGB_SEARCH_SPACE = {
+    "learning_rate": (0.003, 1.0, "log-uniform"),
+    "num_leaves": (1, 100),
+    "max_depth": (1, 50),
+    "min_child_samples": (100, 400),
+    "max_bin": (100, 2000),
+    "subsample": (0.6, 1.0, "uniform"),
+    "min_child_weight": (1, 10),
+    "reg_lambda": (1e-3, 1000, "log-uniform"),
+    "reg_alpha": (1e-3, 1.0, "log-uniform"),
+    "n_estimators": (50, 1600),
+}
 
 
 def evaluate_model(y_actual, y_pred, y_pred_bm, output_dir, model_name="Model"):
@@ -159,26 +174,6 @@ def plot_roc_auc(y_pred, y_true, output_dir, title="ROC-AUC curve"):
     plt.close()
 
 
-def plot_reg_coefs(var_names, coefficients, n=10):
-    """
-    Plot logit regression feature importance
-
-    Args:
-        var_names (series): variable names
-        coefficients (series): regression coefficients
-        n (integer): how many features to plot
-    """
-    coef_df = pd.DataFrame()
-    coef_df["var_names"] = var_names
-    coef_df["coef_vals"] = coefficients
-    coef_df["abs_vals"] = np.abs(coef_df.coef_vals)
-    coef_df = coef_df.set_index("var_names").sort_values(by="abs_vals", ascending=False)
-    plt.figure(figsize=(4, 8))
-    ax = coef_df.head(n).coef_vals.plot.barh()
-    plt.title(f"Top {n} features - logistic regression \n")
-    plt.show()
-
-
 def dataset_eda(data, output_dir):
     """
     Saves plots with basic overview of dataset to output_dir
@@ -220,3 +215,45 @@ def dataset_eda(data, output_dir):
     plt.tight_layout()
     plt.savefig(f"{output_dir}/plots/corr plot.png")
     plt.close()
+
+
+def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
+    """
+    Bayesian tuning for a Lightgbm classifier, efficiently tuning hyperparams
+    
+    Args:
+        X (dataframe): model_features
+        y (series): binary target
+        search_space (dictionary): parameter space to search
+        n_iters (int): number of points in search space to evaluate
+        
+    Returns:
+        results (object): recording of avg. crossvalidated bier-score at each point in search-space
+
+    Todo, refactor to generalise - e.g. use in regression/other model types
+    """
+
+    def update_model_status(optim_result):
+        """Status callback durring bayesian hyperparameter search"""
+        logger.info(
+            f"""Model #{len(pd.DataFrame(bayes_cv_tuner.cv_results_))  }
+        Best Brier: { np.round(bayes_cv_tuner.best_score_, 7)}
+        Best params: { bayes_cv_tuner.best_params_}
+        """
+        )
+
+    bayes_cv_tuner = BayesSearchCV(
+        estimator=lgb.LGBMClassifier(
+            objective="binary", metric="auc", n_jobs=-1, verbose=1
+        ),
+        search_spaces=search_space,
+        scoring="brier_score_loss",
+        cv=StratifiedKFold(n_splits=5),
+        n_jobs=-1,
+        n_iter=n_iters,
+        verbose=0,
+        refit=True,
+        error_score=-100,
+    )
+
+    return bayes_cv_tuner.fit(X.values, y.values, callback=update_model_status)

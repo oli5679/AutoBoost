@@ -1,0 +1,4 @@
+
+model_path = "data/road-safety-1.1/bin/model-bin.pkl"
+
+model_feature_list = ['Unnamed: 0', 'Urban Rural_label', 'Carriageway_Hazards_label', 'Special_Conditions_at_Site_label', 'Road Surface_label', 'Weather_label', 'Light_Conditions_label', 'Ped Cross - Physical_label', 'Ped Cross - Human_label', '2nd_Road_Class_label', 'Junction_Control_label', 'Junction_Detail_label', 'Road_Type_label', '1st_Road_Class_label', 'Local_Authority_(Highway)_label', 'Local_Authority_(District)_label', 'Day_of_Week_label', 'Police_Force_label', 'Location_Easting_OSGR', 'Location_Northing_OSGR', 'Longitude', 'Latitude', 'Number_of_Vehicles', 'Number_of_Casualties', 'Date', 'Time', '1st_Road_Number', 'Speed_limit', '2nd_Road_Number', 'LSOA_of_Accident_Location', 'year', 'len_Local_Authority_(Highway)_label', 'len_Local_Authority_(District)_label', 'len_LSOA_of_Accident_Location']
