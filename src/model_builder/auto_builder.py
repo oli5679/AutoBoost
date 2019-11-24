@@ -8,13 +8,21 @@ import matplotlib.pyplot as plt
 import subprocess
 import pickle
 from sklearn.pipeline import Pipeline
-from nyoka import lgb_to_pmml
 import shutil
 import os
+from sklearn_pandas import DataFrameMapper
+from sklearn.preprocessing import LabelEncoder
+from sklearn2pmml import sklearn2pmml
+from sklearn2pmml.decoration import CategoricalDomain, ContinuousDomain
+from sklearn2pmml.pipeline import PMMLPipeline
+from nyoka import skl_to_pmml, lgb_to_pmml
 
 import config
-import general
-import preprocess
+import utils
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+pd.options.mode.chained_assignment = None  # default='warn'
 
 
 LGB_SEARCH_SPACE = {
@@ -31,19 +39,12 @@ LGB_SEARCH_SPACE = {
 }
 
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-pd.options.mode.chained_assignment = None  # default='warn'
-
-
-
 class AutoBuilder:
     """'
     E2E classifier builder
     
-    Builds lightgbm binary classifier, including:
+    Builds binary classifier, including:
         - dataset EDA (optional)
-        - feature preprocessing
         - hyperparameter tuning (optional)
         - model performance assessment
         - SHAP-based feature analysis
@@ -51,7 +52,8 @@ class AutoBuilder:
         - creating deployment package (pmml & pkl)
 
     Attributes:
-        auto_build (method): automatically populates output_dir path, with model artifacts, and evaluation charts
+        auto_build (method): automatically builds bin populates output_dir path, with model artifacts, and evaluation charts
+
     """
 
     def __init__(
@@ -59,58 +61,51 @@ class AutoBuilder:
         output_dir_path,
         csv_path,
         target_col="target",
-        target_mapping={0: 0, 1: 1},
-        drop_cols=[],
-        date_cols=[],
-        ord_cols_mapping={},
+        ignore_cols=[],
         eda_flag=True,
         tune_flag=True,
         cardinality_threshold=100,
-        partial_dependency_plot=10,
+        shap_plot_num=10,
         shap_frac=0.05,
         importance_cutoff=0.00,
         corr_cutoff=0.9,
         search_space=LGB_SEARCH_SPACE,
         tuning_iters=25,
         lgb_params={},
+        random_state=1234,
     ):
         """
         Args:
             output_dir_path (string):  filepath where outputs package is created and saved
-            csv_path (string): filepath to input csv
+            csv_path (string): filepath to input csv, NOTE need to preprocess columns to be numeric or string type
             target_col (string, optional): target column, default 'target'
-            target_mapping (dict: optional): mapping of target col to binary value, default no-change 
-            drop_cols (list: optional): columns to be dropped from target csv, default None 
-            date_cols (list: optional): columns to be parsed as datetime then converted to numeric, default None 
-            ord_cols_mapping= (dict: optional): columns to be converted to ordinal values, default None
-            eda_flag (boolean, optional): EDA plots to be generates, default True
+            ignore_cols (iterable, optional): columns to be dropped, default []
+            eda_flag (boolean, optional): EDA plots to be generated, default True
             tune_flag (boolean, optional): Lightgbm hyperparameters to be tuned, default True
-            cardinality_threshold (numeric, optional): column cardinality determining one-hot-encoding or count-encoding, default 100
-            partial_dependency_plot (numeric, optional): Generate SHAP dependency plots for N most important features, default 10
+            shap_plot_num (numeric, optional): Generate SHAP dependency plots for N most important features, default 10
             shap_frac (numeric, optional): Proportion of data sampled for SHAP analysis, default 5%
-            importance_cutoff (numeric, optional): Abs. avg. SHAP value below which feature is dropped, default 0.00
-            corr_cutoff (numeric, optional): Abs. avg. correlation with more important feature above which feature is dropped, default 0.9
+            importance_cutoff (numeric, optional): Abs. avg. SHAP value threshold suggest dropping feature, default 0.00
+            corr_cutoff (numeric, optional): Abs. avg. correlation suggest dropping feature, default 0.9
             search_space (numeric, optional): Tuning space for Bayesian optimisation, default is SKOPT_SEARCH_SPACE
             tuning_iter (numeric, optional): number of tuning iterations for Bayesian optimisation, default is 25,
             lgb_params (dict, optional): Hyperparams to use in case when tune_flag = False, default None
+            random_state (numeric, optional): Random seed for train test split, and model-training - default is 1234
         """
         self.output_dir_path = output_dir_path
         self.csv_path = csv_path
         self.target_col = target_col
-        self.target_mapping = target_mapping
-        self.drop_cols = drop_cols
-        self.date_cols = date_cols
-        self.ord_cols_mapping = ord_cols_mapping
+        self.ignore_cols = ignore_cols
         self.eda_flag = eda_flag
         self.tune_flag = tune_flag
         self.cardinality_threshold = cardinality_threshold
-        self.partial_dependency_plot = partial_dependency_plot
+        self.shap_plot_num = shap_plot_num
         self.shap_frac = shap_frac
         self.importance_cutoff = importance_cutoff
         self.corr_cutoff = corr_cutoff
         self.search_space = search_space
         self.tuning_iters = tuning_iters
         self.lgb_params = lgb_params
+        self.random_state = random_state
 
     def _gen_model_dir(self):
         """
@@ -129,50 +124,66 @@ class AutoBuilder:
 
     def _process_csv(self):
         """
-        Parses csv specifdiend in self.csv_path
+        Parses csv specified in self.csv_path, saving to self.raw
 
         Also
-            - parses 'date' columns as dates
-            - drops 'ignore' columns
-            - drops observations without valid 'target' values
-            - Seperates features from target
-            - Generates train and test set
+            - Drops ignore columns
+            - Validates target and feature columns
+                Target = binary, 0-1
+                Features = numeric or string
         """
         logger.info(f"loading file {self.csv_path}")
-        raw = pd.read_csv(
-            self.csv_path, low_memory=False, parse_dates=self.date_cols
-        ).drop(columns=self.drop_cols)
+        raw = pd.read_csv(self.csv_path).drop(columns=self.ignore_cols)
 
+        logger.info("checking valid input data")
+        assert raw[self.target_col].isna().sum() == 0
+
+        assert list(sorted(raw[self.target_col].unique())) == [0, 1]
+
+        valid_shape = raw.select_dtypes(include=["int64", "float64", "object"]).shape
+        assert valid_shape == raw.shape
+        self.raw = raw
         raw.to_csv(f"{self.output_dir_path}/bin/raw.csv")
 
-        X = raw.loc[raw[self.target_col].isin(self.target_mapping.keys()), :]
-        y = X[self.target_col].map(self.target_mapping)
-        X = X.drop(columns=self.target_col)
-        del raw
+    def _prepare_X_y(self):
+        """
+        Splits self raw into X_train y_train, X_test, y_test 
+
+        Also records categorical and numerical columns, and saves csv of training set
+        """
+
+        y = self.raw[self.target_col]
+        X = self.raw.drop(columns=self.target_col)
 
         logger.info("train test split")
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X, y, test_size=0.20, random_state=42
+            X, y, test_size=0.20, random_state=self.random_state
         )
+        data_train = self.X_train.copy()
+        data_train["target"] = self.y_train
+
+        training_data_path = f"{self.output_dir_path}/bin/train.csv"
+        data_train.to_csv(training_data_path, index=False)
+
         del X, y
 
-    def _encode_non_numeric_cols(self):
-        """
-        Encodes X_train according to following logic:
-            - apply any specified ordinality maappings
-            - map datetime features to numeric, also recording hour, and day of year
-            - one-hot-encode text features with cardinality below threshold, filling in missing columns in 'transform' method
-            - count-encode text features with cardinality above threshold, also recording lenght of string
-        """
-        logger.info("creating autoencoder")
+    def _create_categorical_transformer(self):
+        self.categorical_cols = self.X_train.select_dtypes(include=["object"]).columns
+        self.numeric_cols = self.X_train.select_dtypes(
+            include=["int64", "float64"]
+        ).columns
 
-        self.auto_encoder = preprocess.AutoEncoder(
-            ordinality_mapping=self.ord_cols_mapping,
-            date_cols=self.date_cols,
-            cardinality_threshold=self.cardinality_threshold,
+        self.mapper = DataFrameMapper(
+            [
+                ([cat_column], [CategoricalDomain(), LabelEncoder()])
+                for cat_column in self.categorical_cols
+            ]
+            + [(self.numeric_cols, ContinuousDomain())]
         )
-        self.X_train_encoded = self.auto_encoder.fit_transform(self.X_train)
-        self.X_test_encoded = self.auto_encoder.transform(self.X_test)
+
+        # hacky, also storing seperated X_train_encoded and classifier, because couldn't get SHAP and skopt to work for e2e pipeline
+        self.X_train_encoded = self.mapper.fit_transform(self.X_train)
+        self.var_names = self.X_train.columns
 
     def _tune(self):
         """
@@ -180,7 +191,8 @@ class AutoBuilder:
         """
         # todo, can I save memory, code and possibly tune binning strats by passing unencoded X_train into pipeline?
         logger.info(f"tuning {self.tuning_iters}")
-        results = general.bayes_hyperparam_tune(
+        results = utils.bayes_hyperparam_tune(
+            model=lgb.LGBMClassifier(objective="binary"),
             X=self.X_train_encoded,
             y=self.y_train,
             search_space=self.search_space,
@@ -188,30 +200,6 @@ class AutoBuilder:
         )
         self.lgb_params = results.best_params_
         logger.info(f"best params {self.lgb_params}")
-
-    def _create_pipeline(self):
-        """
-        Creates sklearn pipeline with the following components
-            - encoder: feature-encoder using strategy outlined in self._encode_non_numeric_cols
-            - feature-selector: removes features with 'Shap' importance below threshold, or correlation above threshold with more important feature 
-        """
-        encoder = preprocess.AutoEncoder(
-            ordinality_mapping=self.ord_cols_mapping,
-            date_cols=self.date_cols,
-            cardinality_threshold=self.cardinality_threshold,
-        )
-        feature_selector = preprocess.ColumnRemover(self.cols_to_remove)
-
-        lgb_clf = lgb.LGBMClassifier(**self.lgb_params)
-
-        self.classifer_pipeline = Pipeline(
-            [
-                ("encoder", encoder),
-                ("feature selector", feature_selector),
-                ("lgb classifier", lgb_clf),
-            ]
-        )
-        self.classifer_pipeline.fit(self.X_train, self.y_train)
 
     def _save_model(self):
         """
@@ -221,29 +209,23 @@ class AutoBuilder:
             pipeline (lightgbm pipeline) model to be saved
             output_dir (string): path to save model outputs
             train (df): dataset to save
-
-        TODO - create E2E sklearn pipeline so that can be exported as PMML
         """
-        output_dir = self.output_dir_path + "/bin"
-        pmml_path = f"{output_dir}/model-pmml.pmml"
-        pkl_path = f"{output_dir}/model-bin.pkl"
-        training_data_path = f"{output_dir}/train.csv"
+        pmml_path = f"{self.output_dir_path}/model-pmml.pmml"
+        pkl_path = f"{self.output_dir_path}/model-bin.pkl"
+        pickle.dump(self.pipeline, open(pkl_path, "wb"))
+        # sklearn2pmml(self.pipeline, pmml_path)
 
-        data_train = self.X_train.copy()
-        data_train["target"] = self.y_train
-
-        data_train.to_csv(training_data_path, index=False)
-
-        pickle.dump(self.classifer_pipeline, open(pkl_path, "wb"))
-
-        # Annoying can't get PMML to work for entire pipeline - for now workaround fitting final model and exporting
-        X_train_reduced = self.X_train_encoded.drop(columns=self.cols_to_remove)
-        lgb_pmml = Pipeline([("lgb", lgb.LGBMClassifier(**self.lgb_params))])
-        lgb_pmml.fit(X_train_reduced, self.y_train)
-        features = X_train_reduced.columns
-        target = "target"
-
-        lgb_to_pmml(lgb_pmml, features, target, pmml_path)
+    def _generate_shap_plots(self):
+        classifier = lgb.LGBMClassifier(**self.lgb_params)
+        classifier.fit(self.X_train_encoded, self.y_train)
+        X_shap = pd.DataFrame(data=self.X_train_encoded, columns=self.var_names)
+        self.feature_importance = utils.create_shap_plots(
+            classifier,
+            X_shap,
+            output_dir=self.output_dir_path,
+            N=self.shap_plot_num,
+            frac=self.shap_frac,
+        )
 
     def auto_build(self):
         """
@@ -253,67 +235,53 @@ class AutoBuilder:
 
         self._process_csv()
 
+        self._prepare_X_y()
+
         if self.eda_flag:
             logger.info("EDA")
-            general.dataset_eda(data=self.X_train, output_dir=self.output_dir_path)
+            utils.dataset_eda(data=self.X_train, output_dir=self.output_dir_path)
 
-        self._encode_non_numeric_cols()
+        self._create_categorical_transformer()
 
         if self.tune_flag:
             self._tune()
 
-        logger.info("fitting model")
-        clf = lgb.LGBMClassifier(**self.lgb_params)
-        clf.fit(self.X_train_encoded, self.y_train)
+        self._generate_shap_plots()
+
+        logger.info("creating pipeline")
+        classifier = lgb.LGBMClassifier(**self.lgb_params)
+        self.pipeline = PMMLPipeline(
+            [("mapper", self.mapper), ("classifier", classifier)]
+        )
+
+        self.pipeline.fit(self.X_train, self.y_train)
 
         logger.info("Assessing model")
 
-        y_pred = clf.predict_proba(self.X_test_encoded)[:, 1]
+        y_pred = self.pipeline.predict_proba(self.X_test)[:, 1]
         y_bm = np.repeat(self.y_train.mean(), self.y_test.shape)
-        general.evaluate_model(
-            self.y_test, y_pred, y_bm, self.output_dir_path, "Model - all features"
-        )
+        utils.evaluate_model(self.y_test, y_pred, y_bm, self.output_dir_path, "Model")
 
-        self.feature_importance = general.create_shap_plots(
-            clf,
-            self.X_train_encoded,
-            output_dir=self.output_dir_path,
-            N=self.partial_dependency_plot,
-            frac=self.shap_frac,
-        )
-
-        logger.info("finding columns to remove")
-        self.cols_to_remove = general.find_features_to_remove(
+        logger.info("suggeting features to remove")
+        self.cols_to_remove = utils.find_features_to_remove(
             importance=self.feature_importance,
-            X=self.X_train_encoded,
+            X=self.X_train,
             importance_cutoff=self.importance_cutoff,
             corr_threshold=self.corr_cutoff,
         )
-        logger.info(f'remove cols - {self.cols_to_remove}')
-        logger.info("fitting new model")
-        self._create_pipeline()
-
-        y_pred_reduced = self.classifer_pipeline.predict_proba(self.X_test)[:, 1]
-
-        general.evaluate_model(
-            self.y_test,
-            y_pred_reduced,
-            y_bm,
-            self.output_dir_path,
-            "Model - reduced features",
-        )
+        logger.info(f"candidates to remove - {self.cols_to_remove}")
 
         logger.info(f"saving model \n{self.output_dir_path}")
 
         self._save_model()
-
-        logger.info(f"test-case Flask \n{ dict(self.X_test.iloc[0]) }")
-        logger.info(f"test-case Openscoring \n{ dict(self.X_train_encoded.drop(columns=self.cols_to_remove).iloc[0]) }")
-        logger.info(f"test-case model score \n{self.classifer_pipeline.predict_proba(self.X_test.head(1))}")
-
-
+        test_input = dict(self.X_test.iloc[0])
+        test_score = self.pipeline.predict_proba(self.X_test.head(1))
+        logger.info(
+            f"test-case model inputs \n{ test_input } \n model score \n {test_score}"
+        )
 
         logger.info("done!")
+
 
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
@@ -322,9 +290,9 @@ if __name__ == "__main__":
         csv_path=config.csv_path,
         output_dir_path=config.output_dir_path,
         target_col=config.target_col,
-        drop_cols=config.drop_cols,
-        date_cols=config.date_cols,
+        ignore_cols=config.ignore_cols,
         tuning_iters=25,
-        tune_flag=False
+        tune_flag=True,
+        eda_flag=True,
     )
     auto_builder.auto_build()

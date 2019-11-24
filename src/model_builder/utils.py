@@ -50,7 +50,7 @@ def evaluate_model(y_actual, y_pred, y_pred_bm, output_dir, model_name="Model"):
     plot_roc_auc(y_pred=y_pred, y_true=y_actual, title=title, output_dir=output_dir)
 
 
-def create_shap_plots(model, X, output_dir, N=10, frac=0.05):
+def create_shap_plots(model, X, output_dir, N=10, frac=0.05, cat_col_mapping={}):
     """Creates SHAP plots showing average marginal impact of features prediction of model:
 
     Args:
@@ -59,6 +59,7 @@ def create_shap_plots(model, X, output_dir, N=10, frac=0.05):
         output_dir (string): path to save outputs
         N (int): number of partial dependency plots to make
         frac (float): % of X to sample - this can be slow on large datasets
+        cat_col_mapping (dict): columns to be mapped to categorical
 
     Returns:
         importance (array): avg. abs. Shap value, higher = more important feature
@@ -67,6 +68,8 @@ def create_shap_plots(model, X, output_dir, N=10, frac=0.05):
     # Todo, add some support for categorical cols
 
     X_sample = X.sample(frac=frac)
+    for col in cat_col_mapping.keys():
+        X_sample[col] = X_sample[col].cat.code
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_sample)
 
@@ -122,20 +125,22 @@ def find_high_corr_cols(X, corr_threshold, importance=None):
 
     Args:
          X (df): training set features
-         corr_threshold (numeric): maximum allowed correlation with more imortant feature
+         corr_threshold (numeric): maximum allowed correlation with more important feature
          importance (series): feature importance rankings, default is reverse of column-order
 
     Returns:
         high_corr_cols (list): All cols with corr > threshold for a more 'important' feature 
+    
+    NOTE - this doesn't deal perfectly with categoricals
     """
     if importance is None:
         importance = range(X.shape[1])
 
     importance_ranking = importance.argsort()
-    X = X.iloc[:, importance_ranking]
+    X_corr = X.copy().iloc[:, importance_ranking]
     importance = importance[importance_ranking]
 
-    corr_matrix = X.corr()
+    corr_matrix = X_corr.corr()
     high_corr_cols = []
     n_cols = len(corr_matrix.columns)
     for i in range(n_cols):
@@ -144,7 +149,6 @@ def find_high_corr_cols(X, corr_threshold, importance=None):
             col = corr_matrix.columns[i]
             row = corr_matrix.index[j]
             if abs(val) >= corr_threshold:
-                # logger.infos the correlated feature set and the corr val
                 logger.info(
                     f"dropping {col} because of correlation {val:.3f} with with {row}"
                 )
@@ -217,11 +221,12 @@ def dataset_eda(data, output_dir):
     plt.close()
 
 
-def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
+def bayes_hyperparam_tune(model, X, y, search_space, n_iters=20):
     """
     Bayesian tuning for a Lightgbm classifier, efficiently tuning hyperparams
     
     Args:
+        model (object): sklearn-like classifier
         X (dataframe): model_features
         y (series): binary target
         search_space (dictionary): parameter space to search
@@ -230,7 +235,6 @@ def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
     Returns:
         results (object): recording of avg. crossvalidated bier-score at each point in search-space
 
-    Todo, refactor to generalise - e.g. use in regression/other model types
     """
 
     def update_model_status(optim_result):
@@ -243,9 +247,7 @@ def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
         )
 
     bayes_cv_tuner = BayesSearchCV(
-        estimator=lgb.LGBMClassifier(
-            objective="binary", metric="auc", n_jobs=-1, verbose=1
-        ),
+        estimator=model,
         search_spaces=search_space,
         scoring="brier_score_loss",
         cv=StratifiedKFold(n_splits=5),
@@ -256,4 +258,4 @@ def bayes_hyperparam_tune(X, y, search_space, n_iters=20):
         error_score=-100,
     )
 
-    return bayes_cv_tuner.fit(X.values, y.values, callback=update_model_status)
+    return bayes_cv_tuner.fit(X, y, callback=update_model_status)
